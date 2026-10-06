@@ -10,76 +10,168 @@ import (
 
 func sample() Response {
 	return Response{
-		"ip":           "8.8.8.8",
-		"country_code": "US",
-		"city_name":    "Mountain View",
-		"is_proxy":     false,
-		"message":      "Limit to 1,000 queries per day.",
-		"country": map[string]any{
-			"name": "United States of America",
-			"currency": map[string]any{
-				"code": "USD",
-			},
-		},
-		"continent": map[string]any{
-			"name":        "North America",
-			"hemisphere":  []any{"north", "west"},
-			"translation": map[string]any{"lang": nil, "value": nil},
-		},
+		{"ip", "8.8.8.8"},
+		{"country_code", "US"},
+		{"city_name", "Mountain View"},
+		{"is_proxy", false},
+		{"message", "Limit to 1,000 queries per day."},
+		{"country", Response{
+			{"name", "United States of America"},
+			{"currency", Response{{"code", "USD"}}},
+		}},
+		{"continent", Response{
+			{"name", "North America"},
+			{"hemisphere", []any{"north", "west"}},
+			{"translation", Response{{"lang", nil}, {"value", nil}}},
+		}},
 	}
+}
+
+func sampleKeys(r Response) []string {
+	keys := make([]string, 0, len(r))
+	for _, f := range r {
+		keys = append(keys, f.Key)
+	}
+	return keys
 }
 
 func TestProjectKeepsNestedPathOnly(t *testing.T) {
 	got := project(sample(), []string{"ip", "country.currency.code"})
 
-	if got["ip"] != "8.8.8.8" {
-		t.Errorf("ip = %v, want 8.8.8.8", got["ip"])
+	if v, _ := got.String("ip"); v != "8.8.8.8" {
+		t.Errorf("ip = %q, want 8.8.8.8", v)
 	}
 
-	country, ok := got["country"].(map[string]any)
+	raw, ok := got.Get("country")
 	if !ok {
-		t.Fatalf("country missing from projection: %v", got)
+		t.Fatalf("country missing from projection: %v", sampleKeys(got))
 	}
-	if _, ok := country["name"]; ok {
+	country, ok := raw.(Response)
+	if !ok {
+		t.Fatalf("country is %T, want Response", raw)
+	}
+	if _, ok := country.Get("name"); ok {
 		t.Error("country.name should have been pruned")
 	}
 
-	currency, ok := country["currency"].(map[string]any)
-	if !ok || currency["code"] != "USD" {
-		t.Errorf("country.currency.code = %v, want USD", currency)
+	raw, ok = country.Get("currency")
+	if !ok {
+		t.Fatal("country.currency missing")
+	}
+	currency, _ := raw.(Response)
+	if v, _ := currency.String("code"); v != "USD" {
+		t.Errorf("country.currency.code = %q, want USD", v)
 	}
 }
 
 func TestProjectKeepsWholeSubtree(t *testing.T) {
 	got := project(sample(), []string{"country"})
-	country, ok := got["country"].(map[string]any)
-	if !ok || country["name"] == nil {
-		t.Errorf("whole country subtree should be kept, got %v", got["country"])
+
+	raw, ok := got.Get("country")
+	if !ok {
+		t.Fatal("country missing")
+	}
+	country, _ := raw.(Response)
+	if _, ok := country.Get("name"); !ok {
+		t.Error("naming a parent should keep its whole subtree")
 	}
 }
 
-func TestFieldRankGroupsNestedUnderParent(t *testing.T) {
-	if fieldRank("country.currency.code") != fieldRank("country") {
-		t.Error("nested key should rank with its top-level parent")
-	}
-	if fieldRank("country_code") == fieldRank("country") {
-		t.Error("country_code must not rank with the country object")
-	}
-}
+func TestProjectPreservesResponseOrder(t *testing.T) {
+	// Requested in a different order than the response carries them.
+	got := project(sample(), []string{"country_code", "ip"})
 
-func TestSortByCanonical(t *testing.T) {
-	keys := []string{"zzz_unknown", "city_name", "aaa_unknown", "ip", "country_code"}
-	sortByCanonical(keys)
-
-	want := []string{"ip", "country_code", "city_name", "aaa_unknown", "zzz_unknown"}
+	want := []string{"ip", "country_code"}
+	gotKeys := sampleKeys(got)
+	if len(gotKeys) != len(want) {
+		t.Fatalf("keys = %v, want %v", gotKeys, want)
+	}
 	for i := range want {
-		if keys[i] != want[i] {
-			t.Fatalf("keys = %v, want %v", keys, want)
+		if gotKeys[i] != want[i] {
+			t.Fatalf("keys = %v, want %v", gotKeys, want)
 		}
 	}
 }
 
-func TestRenderCSVSkipsMessageAndOrdersColumns(t *testing.T) {
+func TestMatchPaths(t *testing.T) {
+	if sub, ok := matchPaths([]string{"country"}, "country"); !ok || sub != nil {
+		t.Errorf("whole subtree match = %v, %v; want nil, true", sub, ok)
+	}
+	if sub, ok := matchPaths([]string{"country.currency.code"}, "country"); !ok || len(sub) != 1 || sub[0] != "currency.code" {
+		t.Errorf("nested match = %v, %v", sub, ok)
+	}
+	if _, ok := matchPaths([]string{"country"}, "city_name"); ok {
+		t.Error("unrelated key should not match")
+	}
+}
+
+func TestRenderJSONPreservesFieldOrder(t *testing.T) {
+	var buf bytes.Buffer
+	if err := renderJSON(&buf, []Response{sample()}); err != nil {
+		t.Fatalf("renderJSON: %v", err)
+	}
+
+	out := buf.String()
+	if !strings.HasPrefix(strings.TrimSpace(out), "{\n  \"ip\":") {
+		t.Errorf("first field should be ip, got:\n%s", out)
+	}
+
+	// Alphabetical ordering would put city_name first.
+	if strings.Index(out, `"ip"`) > strings.Index(out, `"city_name"`) {
+		t.Error("ip should come before city_name")
+	}
+	if strings.Index(out, `"country_code"`) > strings.Index(out, `"city_name"`) {
+		t.Error("country_code should come before city_name")
+	}
+	if strings.Index(out, `"country"`) > strings.Index(out, `"continent"`) {
+		t.Error("country should come before continent")
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &decoded); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+}
+
+func TestRenderJSONArrayForMultipleIPs(t *testing.T) {
+	results := []Response{{{Key: "ip", Value: "8.8.8.8"}}, {{Key: "ip", Value: "1.1.1.1"}}}
+
+	var buf bytes.Buffer
+	if err := renderJSON(&buf, results); err != nil {
+		t.Fatalf("renderJSON: %v", err)
+	}
+
+	var decoded []map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &decoded); err != nil {
+		t.Fatalf("want a JSON array, got: %s", buf.String())
+	}
+	if len(decoded) != 2 {
+		t.Errorf("got %d entries, want 2", len(decoded))
+	}
+}
+
+func TestRenderJSONNoHTMLEscaping(t *testing.T) {
+	resp := Response{{Key: "ip", Value: "8.8.8.8"}, {Key: "org", Value: "A & B"}}
+
+	var buf bytes.Buffer
+	if err := renderJSON(&buf, []Response{resp}); err != nil {
+		t.Fatalf("renderJSON: %v", err)
+	}
+
+	if strings.Contains(buf.String(), `\u0026`) {
+		t.Error("ampersand should not be HTML escaped")
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &decoded); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if decoded["org"] != "A & B" {
+		t.Errorf("org = %v, want %q", decoded["org"], "A & B")
+	}
+}
+
+func TestRenderCSVFollowsResponseOrder(t *testing.T) {
 	var buf bytes.Buffer
 	if err := renderCSV(&buf, []Response{sample()}); err != nil {
 		t.Fatalf("renderCSV: %v", err)
@@ -94,19 +186,20 @@ func TestRenderCSVSkipsMessageAndOrdersColumns(t *testing.T) {
 	}
 
 	header := recs[0]
-	for _, c := range header {
+	idx := map[string]int{}
+	for i, c := range header {
+		idx[c] = i
 		if c == "message" {
 			t.Error("message column should not appear in CSV")
 		}
 	}
 
-	if header[0] != "ip" {
-		t.Errorf("first column = %q, want ip", header[0])
+	// Alphabetical ordering would put city_name first.
+	if header[0] != "ip" || header[1] != "country_code" {
+		t.Errorf("header should follow response order, got %v", header)
 	}
-
-	idx := map[string]int{}
-	for i, c := range header {
-		idx[c] = i
+	if idx["country_code"] > idx["city_name"] {
+		t.Error("country_code should come before city_name")
 	}
 
 	if got := recs[1][idx["country.currency.code"]]; got != "USD" {
@@ -121,8 +214,8 @@ func TestRenderCSVSkipsMessageAndOrdersColumns(t *testing.T) {
 }
 
 func TestRenderCSVUnionsColumnsAcrossIPs(t *testing.T) {
-	first := Response{"ip": "8.8.8.8"}
-	second := Response{"ip": "1.1.1.1", "fraud_score": json.Number("12")}
+	first := Response{{Key: "ip", Value: "8.8.8.8"}}
+	second := Response{{Key: "ip", Value: "1.1.1.1"}, {Key: "fraud_score", Value: json.Number("12")}}
 
 	var buf bytes.Buffer
 	if err := renderCSV(&buf, []Response{first, second}); err != nil {
@@ -139,40 +232,8 @@ func TestRenderCSVUnionsColumnsAcrossIPs(t *testing.T) {
 	if recs[1][1] != "" {
 		t.Errorf("missing value should be empty, got %q", recs[1][1])
 	}
-}
-
-func TestRenderJSONSingleObjectAndNoHTMLEscaping(t *testing.T) {
-	resp := Response{"ip": "8.8.8.8", "as": json.Number("1"), "org": "A & B"}
-
-	var buf bytes.Buffer
-	if err := renderJSON(&buf, []Response{resp}); err != nil {
-		t.Fatalf("renderJSON: %v", err)
-	}
-
-	if strings.Contains(buf.String(), `\u0026`) {
-		t.Error("ampersand should not be HTML escaped")
-	}
-
-	var decoded map[string]any
-	if err := json.Unmarshal(buf.Bytes(), &decoded); err != nil {
-		t.Fatalf("invalid JSON: %v", err)
-	}
-}
-
-func TestRenderJSONArrayForMultipleIPs(t *testing.T) {
-	results := []Response{{"ip": "8.8.8.8"}, {"ip": "1.1.1.1"}}
-
-	var buf bytes.Buffer
-	if err := renderJSON(&buf, results); err != nil {
-		t.Fatalf("renderJSON: %v", err)
-	}
-
-	var decoded []map[string]any
-	if err := json.Unmarshal(buf.Bytes(), &decoded); err != nil {
-		t.Fatalf("want a JSON array, got: %s", buf.String())
-	}
-	if len(decoded) != 2 {
-		t.Errorf("got %d entries, want 2", len(decoded))
+	if recs[2][1] != "12" {
+		t.Errorf("fraud_score = %q, want 12", recs[2][1])
 	}
 }
 
@@ -196,10 +257,14 @@ func TestRenderTableSkipsNoiseAndShowsNested(t *testing.T) {
 }
 
 func TestFlattenArray(t *testing.T) {
-	out := map[string]string{}
-	flatten("hemisphere", []any{"north", "west"}, out)
-	if out["hemisphere"] != "north; west" {
-		t.Errorf("flatten = %q, want %q", out["hemisphere"], "north; west")
+	var out []Field
+	flatten("hemisphere", []any{"north", "west"}, &out)
+
+	if len(out) != 1 {
+		t.Fatalf("got %d fields, want 1", len(out))
+	}
+	if out[0].Value != "north; west" {
+		t.Errorf("flatten = %v, want %q", out[0].Value, "north; west")
 	}
 }
 

@@ -32,8 +32,74 @@ func NewClient(apiKey, lang string) *Client {
 	}
 }
 
-// Response for geolocation result
-type Response map[string]any
+// One key/value pair from the response
+type Field struct {
+	Key   string
+	Value any
+}
+
+// Geolocation result, kept in the order the API returned it
+type Response []Field
+
+// Get returns a top-level field
+func (r Response) Get(key string) (any, bool) {
+	for _, f := range r {
+		if f.Key == key {
+			return f.Value, true
+		}
+	}
+	return nil, false
+}
+
+// String returns a top-level string field
+func (r Response) String(key string) (string, bool) {
+	v, ok := r.Get(key)
+	if !ok {
+		return "", false
+	}
+	s, ok := v.(string)
+	return s, ok
+}
+
+// MarshalJSON writes the fields in order
+func (r Response) MarshalJSON() ([]byte, error) {
+	var buf bytes.Buffer
+	buf.WriteByte('{')
+
+	for i, f := range r {
+		if i > 0 {
+			buf.WriteByte(',')
+		}
+
+		key, err := marshalValue(f.Key)
+		if err != nil {
+			return nil, err
+		}
+
+		val, err := marshalValue(f.Value)
+		if err != nil {
+			return nil, err
+		}
+
+		buf.Write(key)
+		buf.WriteByte(':')
+		buf.Write(val)
+	}
+
+	buf.WriteByte('}')
+	return buf.Bytes(), nil
+}
+
+func marshalValue(v any) ([]byte, error) {
+	var buf bytes.Buffer
+
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	return bytes.TrimRight(buf.Bytes(), "\n"), nil
+}
 
 // API Error
 type APIError struct {
@@ -93,12 +159,8 @@ func (c *Client) Lookup(ctx context.Context, ip string) (Response, error) {
 		return nil, fmt.Errorf("reading response: %w", err)
 	}
 
-	// Keeps coordinates and codes verbatim.
-	dec := json.NewDecoder(bytes.NewReader(body))
-	dec.UseNumber()
-
-	var out Response
-	if err := dec.Decode(&out); err != nil {
+	out, err := decodeResponse(body)
+	if err != nil {
 		// A non-JSON body on a bad status
 		if resp.StatusCode != http.StatusOK {
 			return nil, fmt.Errorf("HTTP %d from IP2Location.io: %s", resp.StatusCode, firstLine(body))
@@ -107,7 +169,7 @@ func (c *Client) Lookup(ctx context.Context, ip string) (Response, error) {
 	}
 
 	// Failures as error
-	if raw, ok := out["error"]; ok {
+	if raw, ok := out.Get("error"); ok {
 		return nil, decodeAPIError(raw)
 	}
 
@@ -118,19 +180,89 @@ func (c *Client) Lookup(ctx context.Context, ip string) (Response, error) {
 	return out, nil
 }
 
+// Decode a body into an ordered response
+func decodeResponse(body []byte) (Response, error) {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	// Keeps coordinates and codes verbatim
+	dec.UseNumber()
+
+	v, err := decodeValue(dec)
+	if err != nil {
+		return nil, err
+	}
+
+	r, ok := v.(Response)
+	if !ok {
+		return nil, fmt.Errorf("expected a JSON object")
+	}
+	return r, nil
+}
+
+func decodeValue(dec *json.Decoder) (any, error) {
+	tok, err := dec.Token()
+	if err != nil {
+		return nil, err
+	}
+
+	delim, ok := tok.(json.Delim)
+	if !ok {
+		return tok, nil
+	}
+
+	switch delim {
+	case '{':
+		var obj Response
+		for dec.More() {
+			keyTok, err := dec.Token()
+			if err != nil {
+				return nil, err
+			}
+			key, _ := keyTok.(string)
+
+			val, err := decodeValue(dec)
+			if err != nil {
+				return nil, err
+			}
+			obj = append(obj, Field{key, val})
+		}
+		if _, err := dec.Token(); err != nil {
+			return nil, err
+		}
+		return obj, nil
+
+	case '[':
+		var arr []any
+		for dec.More() {
+			val, err := decodeValue(dec)
+			if err != nil {
+				return nil, err
+			}
+			arr = append(arr, val)
+		}
+		if _, err := dec.Token(); err != nil {
+			return nil, err
+		}
+		return arr, nil
+	}
+
+	return nil, fmt.Errorf("unexpected JSON delimiter %q", delim)
+}
+
 func decodeAPIError(raw any) error {
-	obj, ok := raw.(map[string]any)
+	obj, ok := raw.(Response)
 	if !ok {
 		return fmt.Errorf("unexpected error response from IP2Location.io")
 	}
 
 	e := &APIError{}
-	if n, ok := obj["error_code"].(json.Number); ok {
-		if v, err := strconv.Atoi(n.String()); err == nil {
-			e.Code = v
+	if n, ok := obj.Get("error_code"); ok {
+		if num, ok := n.(json.Number); ok {
+			if v, err := strconv.Atoi(num.String()); err == nil {
+				e.Code = v
+			}
 		}
 	}
-	if s, ok := obj["error_message"].(string); ok {
+	if s, ok := obj.String("error_message"); ok {
 		e.Message = s
 	}
 	if e.Message == "" {

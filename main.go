@@ -6,15 +6,13 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"runtime/debug"
 	"strings"
 	"time"
 )
 
 const appName = "gh-ip2location"
 
-// Version can be set at build time with -ldflags "-X main.version=v1.0.0".
-var version = "v1.0.1"
+var version = "v1.0.2"
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
@@ -34,7 +32,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 0
 
 	case opts.showVersion:
-		fmt.Fprintf(stdout, "%s %s\n", appName, resolveVersion())
+		fmt.Fprintf(stdout, "%s %s\n", appName, version)
 		return 0
 
 	case opts.setKey != "":
@@ -93,7 +91,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 
 		// Keep the keyless notice off stdout
-		if msg, ok := resp["message"].(string); ok && msg != "" && !seenNote[msg] {
+		if msg, ok := resp.String("message"); ok && msg != "" && !seenNote[msg] {
 			seenNote[msg] = true
 			notices = append(notices, msg)
 		}
@@ -125,28 +123,8 @@ func describeIP(ip string) string {
 	return ip
 }
 
-// Resolve version from VCS info
-func resolveVersion() string {
-	if version != "" {
-		return version
-	}
-
-	if bi, ok := debug.ReadBuildInfo(); ok {
-		if v := bi.Main.Version; v != "" && v != "(devel)" {
-			return v
-		}
-		for _, s := range bi.Settings {
-			if s.Key == "vcs.revision" && len(s.Value) >= 7 {
-				return "dev+" + s.Value[:7]
-			}
-		}
-	}
-
-	return "dev"
-}
-
 func userAgent() string {
-	return appName + "/" + resolveVersion()
+	return appName + "/" + version
 }
 
 type options struct {
