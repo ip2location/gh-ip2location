@@ -14,7 +14,7 @@ import (
 const appName = "gh-ip2location"
 
 // Version can be set at build time with -ldflags "-X main.version=v1.0.0".
-var version = "v1.0.0"
+var version = "v1.0.1"
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
@@ -102,7 +102,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 
 	for _, n := range notices {
-		fmt.Fprintf(stderr, "%s: note: %s\n", appName, n)
+		fmt.Fprintf(stderr, "Note: %s\n", n)
 	}
 
 	if len(results) > 0 {
